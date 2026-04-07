@@ -1,0 +1,619 @@
+---
+title: "R code publication"
+format: html
+editor: visual
+---
+
+## Contemporary suitability map
+
+```{r}
+library(terra)
+library(RColorBrewer)
+library(rnaturalearth)
+library(sf)
+library(here)
+
+in_tif  <- here("Proj_current_unknown.species_maxent_cloglog.tif")
+out_png <- here("current_suitability.png")
+
+r <- rast(in_tif)
+
+# Breaks & labels
+brks <- c(0, seq(0.1, 1.0, by = 0.1))
+labs <- c("0.00–0.10","0.10–0.20","0.20–0.30","0.30–0.40",
+          "0.40–0.50","0.50–0.60","0.60–0.70","0.70–0.80",
+          "0.80–0.90","0.90–1.00")
+cols <- rev(RColorBrewer::brewer.pal(10, "Spectral"))
+
+# Clamp to [0,1]
+eps <- sqrt(.Machine$double.eps)
+r <- terra::clamp(r, lower = 0 - eps, upper = 1 + eps, values = TRUE)
+r <- terra::app(r, \(v) pmin(pmax(v, 0), 1))
+
+# Bin to categories (1..10)
+rcat <- app(r, \(v) as.integer(cut(v, brks, include.lowest = TRUE, right = FALSE)))
+rcat <- as.factor(rcat)
+levs <- levels(rcat)
+levs[[1]] <- data.frame(value = 1:10, label = labs)
+levels(rcat) <- levs
+coltab(rcat) <- data.frame(value = 1:10, color = cols)
+
+# Get Australian state boundaries
+aus_states <- ne_states(country = "Australia", returnclass = "sf") |>
+  st_make_valid()
+
+# Convert to terra vector format and project to match raster CRS
+aus_states_v <- project(vect(aus_states), crs(rcat))
+
+# Calculate centroids for labels
+centroids <- st_coordinates(st_centroid(aus_states))
+
+# Create state abbreviations
+state_names <- aus_states$name
+state_abbrev <- c(
+  "New South Wales" = "NSW",
+  "Victoria" = "VIC",
+  "Queensland" = "QLD",
+  "South Australia" = "SA",
+  "Western Australia" = "WA",
+  "Tasmania" = "TAS",
+  "Northern Territory" = "NT",
+  "Australian Capital Territory" = "ACT"
+)
+
+labels_text <- state_abbrev[state_names]
+
+# Create plot
+png(out_png, width = 2400, height = 1800, res = 250, bg = "white")
+par(mar = c(4, 4, 2, 12), bg = "white")
+
+plot(rcat, type = "classes", col = cols, 
+     axes = FALSE,
+     legend = FALSE
+)
+
+legend(
+  x = 151,
+  y = -8.5,
+  legend = labs,
+  fill = cols,
+  title = "Relative suitability\n(cloglog)",
+  xpd = NA,
+  cex = 1.15,
+  bty = "n"
+)
+
+# Add state boundaries
+lines(aus_states_v, col = "gray30", lwd = 1.5)
+
+# Create adjustment vectors for each state
+lon_adjust <- c(
+  "NSW" = -4,      # No adjustment for NSW
+  "VIC" = 0,      # No adjustment for VIC
+  "QLD" = 0,      # No adjustment for QLD
+  "SA" = 0,       # No adjustment for SA
+  "WA" = 0,       # No adjustment for WA
+  "TAS" = 0,      # No adjustment for TAS
+  "NT" = 0,       # No adjustment for NT
+  "ACT" = 0     # Move ACT 1.5 degrees east (example)
+)
+
+lat_adjust <- c(
+  "NSW" = 2,      # No adjustment for NSW
+  "VIC" = 0.22,      # No adjustment for VIC
+  "QLD" = 0,      # No adjustment for QLD
+  "SA" = 0,       # No adjustment for SA
+  "WA" = 0,       # No adjustment for WA
+  "TAS" = 0,      # No adjustment for TAS
+  "NT" = 0,       # No adjustment for NT
+  "ACT" = -0.5    # Move ACT 0.5 degrees south (example)
+)
+
+# Apply adjustments
+adjusted_lon <- centroids[, 1] + lon_adjust[labels_text]
+adjusted_lat <- centroids[, 2] + lat_adjust[labels_text]
+
+# Add state labels with manual adjustments
+text(adjusted_lon, adjusted_lat, labels = labels_text, 
+     cex = 1.0, font = 2, col = "white")
+
+# Add Torres Strait Islands label outside plot region
+text(x = 142.5, y = -9.0, labels = "Torres Strait\nIslands", 
+     cex = 0.85, font = 2, col = "gray20", xpd = TRUE)
+# Add Torres Strait Islands label outside plot region
+text(x = 130.5, y = -10.3, labels = "Tiwi Islands", 
+     cex = 0.85, font = 2, col = "gray20", xpd = TRUE)
+
+# Add axes with degree labels
+ex  <- ext(rcat)
+lon <- pretty(c(ex[1], ex[2]), n = 6)
+lat <- pretty(c(ex[3], ex[4]), n = 6)
+
+deg_lab_lon <- function(x) paste0(abs(x), "°", ifelse(x < 0, "W", "E"))
+deg_lab_lat <- function(x) paste0(abs(x), "°", ifelse(x < 0, "S", "N"))
+
+axis(1, at = lon, labels = deg_lab_lon(lon), las = 1, cex.axis = 0.9, 
+     tick = FALSE, line = 0)
+axis(2, at = lat, labels = deg_lab_lat(lat), las = 1, cex.axis = 0.9,
+     tick = FALSE, line = 0)
+
+dev.off()
+```
+
+## Four climate change maps
+
+```{r}
+library(terra)
+library(RColorBrewer)
+library(rnaturalearth)
+library(sf)
+library(rmapshaper)
+library(here)
+
+tif_paths <- here(c(
+  "future_2_2050.tif",
+  "future_2_2090.tif",
+  "future_3_2050.tif",
+  "future_3_2090.tif"
+))
+panel_titles <- c(
+  "SSP2-4.5 (2040–2059)",
+  "SSP3-7.0 (2040–2059)",
+  "SSP2-4.5 (2080–2099)",
+  "SSP3-7.0 (2080–2099)"
+)
+out_png <- here("suitability_4panel_masked_fast.png")
+
+brks <- c(0, seq(0.1, 1.0, by = 0.1))
+labs <- c("0.00–0.10","0.10–0.20","0.20–0.30","0.30–0.40",
+          "0.40–0.50","0.50–0.60","0.60–0.70","0.70–0.80",
+          "0.80–0.90","0.90–1.00")
+cols <- rev(RColorBrewer::brewer.pal(10, "Spectral"))
+r_list <- lapply(tif_paths, rast)
+tmpl   <- r_list[[1]]
+align_layer <- function(x, tmpl) {
+  x <- if (!compareGeom(x, tmpl, stopOnError = FALSE)) {
+    xt <- if (crs(x) != crs(tmpl)) project(x, crs(tmpl), method = "bilinear") else x
+    resample(xt, tmpl, method = "bilinear")
+  } else x
+  x
+}
+r_list  <- lapply(r_list, align_layer, tmpl = tmpl)
+r_stack <- rast(r_list)
+aus_sf <- ne_countries(country = "Australia", scale = "medium", returnclass = "sf") |>
+  st_make_valid() |>
+  rmapshaper::ms_simplify(keep = 0.10, keep_shapes = TRUE)
+aus_v  <- project(vect(aus_sf), crs(r_stack))
+mask_r <- rasterize(aus_v, r_stack[[1]], field = 1, touches = TRUE)
+eps <- sqrt(.Machine$double.eps)
+r_stack <- clamp(r_stack, lower = 0 - eps, upper = 1 + eps, values = TRUE)
+r_stack <- app(r_stack, \(v) pmin(pmax(v, 0), 1))
+r_stack <- mask(r_stack, mask_r)
+rcat <- app(r_stack, \(v) as.integer(cut(v, brks, include.lowest = TRUE, right = FALSE)))
+rcat <- as.factor(rcat)
+lvl_df <- data.frame(value = 1:10, label = labs)
+levels(rcat) <- lapply(levels(rcat), function(.) lvl_df)
+ctab <- data.frame(value = 1:10, color = cols)
+for (i in 1:nlyr(rcat)) coltab(rcat[[i]]) <- ctab
+# Plot 2×2 with a SINGLE shared legend
+png(out_png, width = 2800, height = 1900, res = 220, bg = "white")
+layout(matrix(c(1, 2, 5,
+                3, 4, 5), nrow = 2, byrow = TRUE),
+       widths = c(1, 1, 0.3))
+par(mar = c(2.5, 1, 2.5, 0.1))
+for (i in 1:nlyr(rcat)) {
+  plot(rcat[[i]],
+       type   = "classes",
+       col    = cols,
+       axes   = TRUE,
+       legend = FALSE,
+       box    = FALSE,
+       mar    = c(3, 1, 1, 0.1),
+       plg    = list(x = "right"))
+  
+  title(panel_titles[i], cex.main = 1.6, line = 1)
+}
+# Create legend panel
+par(fig = c(0, 1, 0, 1), oma = c(0, 0, 0, 0), mar = c(0, 0, 0, 0), new = TRUE)
+plot(0, 0, type = 'n', bty = 'n', xaxt = 'n', yaxt = 'n')
+
+legend(x = 1.05,          
+       y = 0.3,           
+       legend = labs, 
+       fill = cols, 
+       border = "black",
+       cex = 1.7,         
+       bty = "n",
+       title = "Relative suitability (cloglog)",
+       xpd = NA,          
+       xjust = 1,         
+       x.intersp = 0.5,   
+       y.intersp = 1.2)
+
+dev.off()
+```
+
+## Continuous range change map for one scenario
+
+```{r}
+library(terra)
+library(tidyverse)
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(viridis)
+library(patchwork)
+library(RColorBrewer)
+library(here)
+
+options(scipen = 999)
+terra::terraOptions(memfrac = 0.8)
+
+current_projection <- here("Proj_current_JEV_maxent_cloglog2.tif")
+future_projection <- here("future_3_2090.tif")
+output_dir <- here("output")
+
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+}
+
+cat("Loading rasters...\n")
+current_rast <- rast(here(current_projection))
+future_rast <- rast(here(future_projection))
+
+if (!compareGeom(current_rast, future_rast, stopOnError = FALSE)) {
+  cat("Rasters don't align perfectly. Resampling future to match current...\n")
+  future_rast <- resample(future_rast, current_rast, method = "bilinear")
+}
+
+cat("\n\n=== CONTINUOUS CHANGE ANALYSIS ===\n")
+
+suitability_change <- future_rast - current_rast
+
+writeRaster(suitability_change,
+            file.path(output_dir, "suitability_change_continuous.tif"),
+            overwrite = TRUE)
+
+cat("\nSuitability change statistics:\n")
+change_stats <- global(suitability_change, fun = c("min", "max", "mean", "sd"), na.rm = TRUE)
+print(change_stats)
+
+cat("\n\n=== Creating Figures ===\n")
+
+australia <- ne_countries(country = "australia", returnclass = "sf", scale = "medium")
+
+# Get Australian state boundaries
+aus_states <- ne_states(country = "Australia", returnclass = "sf") |>
+  st_make_valid()
+
+# Convert to terra vector format and project to match raster CRS
+aus_states_v <- project(vect(aus_states), crs(suitability_change))
+
+# Calculate centroids for labels
+centroids <- st_coordinates(st_centroid(aus_states))
+
+# Create state abbreviations
+state_names <- aus_states$name
+state_abbrev <- c(
+  "New South Wales" = "NSW",
+  "Victoria" = "VIC",
+  "Queensland" = "QLD",
+  "South Australia" = "SA",
+  "Western Australia" = "WA",
+  "Tasmania" = "TAS",
+  "Northern Territory" = "NT",
+  "Australian Capital Territory" = "ACT"
+)
+labels_text <- state_abbrev[state_names]
+
+lon_adjust <- c(
+  "NSW" = -4,
+
+"VIC" = 0,
+  "QLD" = 0,
+  "SA" = 0,
+  "WA" = 0,
+  "TAS" = 0,
+  "NT" = 0,
+  "ACT" = 0
+)
+
+lat_adjust <- c(
+  "NSW" = 2,
+  "VIC" = 0.22,
+  "QLD" = 0,
+  "SA" = 0,
+  "WA" = 0,
+  "TAS" = 0,
+  "NT" = 0,
+  "ACT" = -0.5
+)
+
+adjusted_lon <- centroids[, 1] + lon_adjust[labels_text]
+adjusted_lat <- centroids[, 2] + lat_adjust[labels_text]
+
+#Continuous change with state boundaries
+cat("Creating Figure 4: Continuous change...\n")
+
+png(file.path(output_dir, "Figure_4_continuous_change.png"),
+    width = 2400, height = 1800, units = "px", res = 300, bg = "white")
+
+par(mar = c(4, 4, 3, 10), bg = "white")
+
+plot(suitability_change,
+     col = colorRampPalette(c("#4575b4", "#91bfdb", "#ffffbf", "#fc8d59", "#d73027"))(100),
+     legend = TRUE,
+     axes = FALSE,
+     box = FALSE,
+     plg = list(
+       title = "Δ Suitability",
+       x = "middleright",
+       xpd = TRUE,
+       inset = c(-0.12, 0),
+       cex = 0.85,
+       bty = "n"
+     ))
+
+# Add state boundaries
+lines(aus_states_v, col = "gray30", lwd = 1.5)
+
+# Add state labels
+text(adjusted_lon, adjusted_lat, labels = labels_text, 
+     cex = 0.9, font = 2, col = "gray30")
+
+# Add axes with degree labels
+ex <- ext(suitability_change)
+lon <- pretty(c(ex[1], ex[2]), n = 6)
+lat <- pretty(c(ex[3], ex[4]), n = 6)
+
+deg_lab_lon <- function(x) paste0(abs(x), "°", ifelse(x < 0, "W", "E"))
+deg_lab_lat <- function(x) paste0(abs(x), "°", ifelse(x < 0, "S", "N"))
+
+axis(1, at = lon, labels = deg_lab_lon(lon), las = 1, cex.axis = 0.9, 
+     tick = FALSE, line = 0)
+axis(2, at = lat, labels = deg_lab_lat(lat), las = 1, cex.axis = 0.9,
+     tick = FALSE, line = 0)
+
+dev.off()
+
+cat("Figure 4 saved.\n")
+```
+
+## Four continuous range change maps
+
+```{r}
+library(terra)
+library(tidyverse)
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(viridis)
+library(patchwork)
+library(RColorBrewer)
+library(here)
+
+# Set options ------------------------------------------------------------------
+options(scipen = 999)
+terra::terraOptions(memfrac = 0.8)
+
+# File paths -------------------------------------------------------------------
+current_projection <- here("Proj_current_JEV_maxent_cloglog2.tif")
+
+# Define four future scenarios
+future_scenarios <- list(
+  list(file = here("future_2_2050.tif"), label = "SSP2-4.5 (2040-2059)"),
+  list(file = here("future_2_2090.tif"), label = "SSP2-4.5 (2080-2099)"),
+  list(file = here("future_3_2050.tif"), label = "SSP3-7.0 (2040-2059)"),
+  list(file = here("future_3_2090.tif"), label = "SSP3-7.0 (2080-2099)")
+)
+
+output_dir <- here("output")
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+}
+
+# Load current raster ----------------------------------------------------------
+cat("Loading current raster...\n")
+current_rast <- rast(current_projection)
+
+# Load Australia boundaries ----------------------------------------------------
+aus_states <- ne_states(country = "Australia", returnclass = "sf") |>
+  st_make_valid()
+aus_states_v <- project(vect(aus_states), crs(current_rast))
+
+# Create state abbreviations and label positions
+centroids <- st_coordinates(st_centroid(aus_states))
+state_names <- aus_states$name
+state_abbrev <- c(
+  "New South Wales" = "NSW",
+  "Victoria" = "VIC",
+  "Queensland" = "QLD",
+  "South Australia" = "SA",
+  "Western Australia" = "WA",
+  "Tasmania" = "TAS",
+  "Northern Territory" = "NT",
+  "Australian Capital Territory" = "ACT"
+)
+labels_text <- state_abbrev[state_names]
+
+lon_adjust <- c("NSW" = -4, "VIC" = 0, "QLD" = 0, "SA" = 0, 
+                "WA" = 0, "TAS" = 0, "NT" = 0, "ACT" = 0)
+lat_adjust <- c("NSW" = 2, "VIC" = 0.22, "QLD" = 0, "SA" = 0, 
+                "WA" = 0, "TAS" = 0, "NT" = 0, "ACT" = -0.5)
+adjusted_lon <- centroids[, 1] + lon_adjust[labels_text]
+adjusted_lat <- centroids[, 2] + lat_adjust[labels_text]
+
+# Process all scenarios and find global min/max for consistent colour scale ---
+cat("Processing all scenarios...\n")
+change_rasters <- list()
+global_min <- Inf
+global_max <- -Inf
+
+for (i in seq_along(future_scenarios)) {
+  scenario <- future_scenarios[[i]]
+  cat(paste0("  Loading ", scenario$label, "...\n"))
+  
+  future_rast <- rast(scenario$file)
+  
+  if (!compareGeom(current_rast, future_rast, stopOnError = FALSE)) {
+    future_rast <- resample(future_rast, current_rast, method = "bilinear")
+  }
+  
+  change_rast <- future_rast - current_rast
+  change_rasters[[i]] <- change_rast
+  
+  # Update global range
+  stats <- global(change_rast, fun = c("min", "max"), na.rm = TRUE)
+  global_min <- min(global_min, stats$min)
+  global_max <- max(global_max, stats$max)
+}
+
+# Make symmetric around zero for diverging palette
+max_abs <- max(abs(global_min), abs(global_max))
+zlim <- c(-max_abs, max_abs)
+
+cat(paste0("Global change range: ", round(global_min, 3), " to ", round(global_max, 3), "\n"))
+cat(paste0("Using symmetric limits: ", round(-max_abs, 3), " to ", round(max_abs, 3), "\n"))
+
+# Define colour palette
+change_cols <- colorRampPalette(c("#4575b4", "#91bfdb", "#ffffbf", "#fc8d59", "#d73027"))(100)
+
+# Create 2x2 figure with shared legend -----------------------------------------
+cat("Creating combined figure...\n")
+
+png(file.path(output_dir, "Figure_climate_scenarios_2x2.png"),
+    width = 3600, height = 3000, units = "px", res = 300, bg = "white")
+
+# Layout: 2x2 grid with space for legend on right
+layout(matrix(c(1, 2, 5,
+                3, 4, 5), nrow = 2, byrow = TRUE),
+       widths = c(1, 1, 0.3),
+       heights = c(1, 1))
+
+par(mar = c(2, 3, 3, 1), bg = "white")
+
+# Get extent for axes
+ex <- ext(current_rast)
+lon <- pretty(c(ex[1], ex[2]), n = 4)
+lat <- pretty(c(ex[3], ex[4]), n = 4)
+deg_lab_lon <- function(x) paste0(abs(x), "°", ifelse(x < 0, "W", "E"))
+deg_lab_lat <- function(x) paste0(abs(x), "°", ifelse(x < 0, "S", "N"))
+
+# Plot each scenario
+for (i in seq_along(future_scenarios)) {
+  plot(change_rasters[[i]],
+       col = change_cols,
+       range = zlim,
+       legend = FALSE,
+       axes = FALSE,
+       box = FALSE,
+       main = future_scenarios[[i]]$label,
+       cex.main = 1.8)
+  
+  # Add state boundaries
+  lines(aus_states_v, col = "gray30", lwd = 1)
+  
+  # Add state labels
+  
+  
+  #text(adjusted_lon, adjusted_lat, labels = labels_text, 
+   #    cex = 0.7, font = 2, col = "gray30")
+  
+  # Add axes
+  axis(1, at = lon, labels = deg_lab_lon(lon), las = 1, cex.axis = 0.7, 
+       tick = FALSE, line = -1)
+  axis(2, at = lat, labels = deg_lab_lat(lat), las = 1, cex.axis = 0.7,
+       tick = FALSE, line = -1)
+}
+
+# Add shared legend in the 5th panel -------------------------------------------
+par(mar = c(4, 1, 4, 3))
+plot.new()
+plot.window(xlim = c(0, 1), ylim = zlim)
+
+# Draw colour bar
+legend_breaks <- seq(zlim[1], zlim[2], length.out = 101)
+rect(0.2, head(legend_breaks, -1), 0.5, tail(legend_breaks, -1),
+     col = change_cols, border = NA)
+rect(0.2, zlim[1], 0.5, zlim[2], border = "gray30", lwd = 1)
+
+# Add horizontal tick lines at 0.2 increments
+tick_positions <- seq(floor(zlim[1] * 5) / 5, ceiling(zlim[2] * 5) / 5, by = 0.2)
+tick_positions <- tick_positions[tick_positions >= zlim[1] & tick_positions <= zlim[2]]
+
+for (tick in tick_positions) {
+  segments(x0 = 0.5, y0 = tick, x1 = 0.6, y1 = tick, col = "gray30", lwd = 1)
+}
+
+# Add tick labels
+text(x = 0.65, y = tick_positions, labels = sprintf("%.1f", tick_positions),
+     adj = 0, cex = 2)
+
+# Add legend title above the legend
+text(x = 0.42, y = zlim[2] + (max_abs * 0.15), labels = "Δ Suitability",
+     cex = 1.8, font = 2, xpd = TRUE)
+
+dev.off()
+
+cat("Combined figure saved to:", file.path(output_dir, "Figure_climate_scenarios_2x2.png"), "\n")
+```
+
+## Jackknife 
+
+```{r}
+library(ggplot2)
+
+regularized_training_gain <- 1.6258
+
+jackknife_data <- data.frame(
+  variable = c("Bioclim_05", "Bioclim_06", "Bioclim_08", 
+               "Bioclim_17", "Bioclim_18"),
+  without = c(1.5242, 1.3937, 1.5536, 1.5822, 1.4930),
+  with_only = c(0.6083, 1.0081, 0.5239, 0.4708, 0.4205)
+)
+
+jackknife_data$variable <- factor(jackknife_data$variable,
+                                  levels = c("Bioclim_18", "Bioclim_17", "Bioclim_08", 
+                                           "Bioclim_06", "Bioclim_05"),
+                                  labels = c("Bio18", "Bio17", "Bio08", 
+                                           "Bio06", "Bio05"))
+
+all_vars_row <- data.frame(
+  variable = factor("All variables", levels = c("All variables", "Bio18", "Bio17", "Bio08",
+                                               "Bio06", "Bio05")),
+  without = NA,
+  with_only = NA
+)
+
+
+ggplot() +
+  geom_col(data = jackknife_data, aes(x = variable, y = without, fill = "Without variable"), width = 0.5) +
+  geom_col(data = jackknife_data, aes(x = variable, y = with_only, fill = "With only variable"), width = 0.3) +
+  geom_col(data = all_vars_row, aes(x = variable, y = regularized_training_gain, fill = "With all variables"), width = 0.5) +
+  geom_text(data = jackknife_data, 
+            aes(x = variable, y = without, label = sprintf("%.2f", without)),
+            hjust = 1.1, size = 3.5, color = "white") +
+  geom_text(data = jackknife_data, 
+            aes(x = variable, y = with_only, label = sprintf("%.2f", with_only)),
+            hjust = 1.1, size = 3.5, color = "black") +
+  geom_text(data = all_vars_row, 
+            aes(x = variable, y = regularized_training_gain, label = sprintf("%.2f", regularized_training_gain)),
+            hjust = 1.1, size = 3.5, color = "white") +
+  scale_fill_manual(values = c("Without variable" = "#453947FF", 
+                               "With only variable" = "#A4BED5FF",
+                               "With all variables" = "#72874EFF")) +
+  coord_flip() +
+  labs(x = "Climate variable",
+       y = "Regularized training gain",
+       fill = "") +
+  theme_minimal() +
+  theme(legend.position = "right",
+        plot.title = element_text(size = 12, face = "bold"),
+        axis.text = element_text(size = 10),
+        axis.title = element_text(size = 11),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = "white", color = NA),
+        plot.background = element_rect(fill = "white", color = NA))
+
+ggsave("jackknife_plot.png", width = 8, height = 4, dpi = 300, bg = "white")
+```
